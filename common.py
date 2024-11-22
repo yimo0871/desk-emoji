@@ -12,6 +12,7 @@ import speech_recognition as sr
 from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 from langchain.memory import ConversationBufferMemory
+from threading import Lock
 
 
 # Set conversation memory
@@ -88,10 +89,10 @@ class ChatGPT(object):
                 api_key = api_key
             )
             self.client.models.list()
-            logger.info("Connect to OpenAI API Success!")
+            logger.info("连接 OpenAI API 成功!")
             return True
         except Exception as e:
-            error(e, "Connect to OpenAI API Failed! Please check the API configuration")
+            error(e, "连接到OpenAI API失败！请检查API配置！")
             return False
 
 
@@ -175,7 +176,6 @@ cmd = CmdClient()
 
 
 class Listener(object):
-
     def __init__(self):
         self.recognizer = sr.Recognizer()
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -185,49 +185,73 @@ class Listener(object):
             with sr.Microphone() as source:
                 print("开始说话...")
                 self.executor.submit(act_random, cmd)
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)  # 加入环境噪音的调整
                 audio_data = self.recognizer.listen(source, timeout=timeout)
                 print("录音已完成")
+
                 with open(audio_path, "wb") as audio_file:
                     audio_file.write(audio_data.get_wav_data())
 
-                audio_file= open(audio_path, "rb")
+                audio_file = open(audio_path, "rb")
                 transcription = chatgpt.client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file
                 )
                 return transcription.text
 
+        except sr.WaitTimeoutError:
+            error("", "录音超时！请确保麦克风工作正常。")
+            return "录音超时"
         except Exception as e:
             error(e, "Speech recognition Failed")
-
+            return "语音识别失败"
 
 listener = Listener()
-
 
 class Speaker(object):
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=1)
-        pygame.mixer.init()
-    
-    def play_audio(self, audio_path):
-        pygame.mixer.music.load(audio_path)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            time.sleep(1)
+        pygame.mixer.init()  # 初始化pygame混音器
 
-    def say(self, text="", model="tts-1", voice="onyx", audio_path='output.mp3'):
+    def play_audio(self, audio_path):
         try:
+            pygame.mixer.music.load(audio_path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.1)  # 等待音频播放完成
+        except Exception as e:
+            logger.error(f"Play audio failed: {e}")
+        finally:
+            # 确保释放音频文件资源
+            pygame.mixer.music.unload()
+            if os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                    logger.info(f"文件 {audio_path} 已删除")
+                except Exception as e:
+                    logger.error(f"删除文件 {audio_path} 失败: {e}")
+
+    def say(self, text="", model="tts-1", voice="onyx"):
+        try:
+            # 生成唯一的音频文件名
+            timestamp = int(time.time())
+            audio_path = f'output_{timestamp}.mp3'
+
+            # 获取 OpenAI 的音频生成
             response = chatgpt.client.audio.speech.create(
                 model=model,
                 voice=voice,
                 input=text
             )
+
+            # 将音频流保存为文件
             response.stream_to_file(audio_path)
+
+            # 在独立线程中播放音频并在播放后删除文件
             self.executor.submit(self.play_audio, audio_path)
 
         except Exception as e:
-            error(e, "Speak Failed")
-
+            logger.error(f"Speak Failed: {e}")
 
 speaker = Speaker()
 
